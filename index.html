@@ -499,7 +499,10 @@
         <h2>Talent directory</h2>
         <p>Every tracked talent, with live totals from the Mark Entry tab. Search, filter and sort to check an individual's standing.</p>
       </div>
-      <button class="btn btn-primary admin-only" id="addParticipantBtn">+ Add participant</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-ghost" id="exportDirectoryBtn">⬇ Export Excel</button>
+        <button class="btn btn-primary admin-only" id="addParticipantBtn">+ Add participant</button>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -886,8 +889,15 @@
       showToast('Switched to Cycle ' + y + '.');
     });
   })();
-  document.getElementById('snapshotPill').textContent = META.snapshotDateLabel;
-  document.getElementById('footGenerated').textContent = 'Portal generated ' + META.snapshotDateLabel;
+  // Live date — computed fresh every time the page loads, instead of a
+  // fixed label baked in at build time, so it always shows today's date.
+  const todayLabel = (function(){
+    const d = new Date();
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
+  })();
+  document.getElementById('snapshotPill').textContent = todayLabel;
+  document.getElementById('footGenerated').textContent = 'Portal generated ' + todayLabel;
 
   /* ============================================================
      TOAST
@@ -1682,6 +1692,7 @@
   const groupFilter = document.getElementById('groupFilter');
   let sortKey = 'group', sortDir = 1;
   let filtersBuilt = false;
+  let lastDirectoryRows = [];
 
   function groupLabel(g){ return g == null ? 'Unassigned' : 'Group ' + g; }
 
@@ -1730,6 +1741,7 @@
       if(av>bv) return 1*sortDir;
       return 0;
     });
+    lastDirectoryRows = rows;
     const admin = isAdminUser();
     document.getElementById('directoryBody').innerHTML = rows.map(t=>`
       <tr>
@@ -1760,6 +1772,76 @@
   function renderDirectoryIfActive(){
     if(document.getElementById('panel-directory').classList.contains('active')) renderDirectory();
   }
+
+  /* ============================================================
+     EXPORT: TALENT DIRECTORY -> EXCEL (CSV, opens directly in Excel)
+     Exports exactly what's currently visible in the directory table
+     (respects the active search / group / department / grade / status
+     filters), including a per-program mark breakdown for each talent.
+  ============================================================ */
+  function csvEscape(val){
+    const s = val === null || val === undefined ? '' : String(val);
+    if(/[",\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+    return s;
+  }
+  async function exportDirectoryToExcel(){
+    if(!filtersBuilt) buildDirectoryFilters();
+    renderDirectory(); // make sure lastDirectoryRows matches the current filters
+    const rows = lastDirectoryRows;
+    const sortedPrograms = programs.slice().sort((a,b)=>(a.order||0)-(b.order||0));
+    const header = ['No','Group','Name','Staff ID','Grade','Department',
+      ...sortedPrograms.map(p=>p.label), 'Total Points','Status'];
+    const lines = [header.map(csvEscape).join(',')];
+    rows.forEach(t=>{
+      const row = [
+        t.no, groupLabel(t.group), t.name, t.staffId, t.grade, t.dept,
+        ...sortedPrograms.map(p=>{
+          const m = t.marks && t.marks[p.id];
+          return (m === undefined || m === null || m === '') ? '' : m;
+        }),
+        t.merit, t.status
+      ];
+      lines.push(row.map(csvEscape).join(','));
+    });
+    // Prefix a UTF-8 BOM so Excel renders non-ASCII characters correctly.
+    const csvContent = '﻿' + lines.join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const stamp = new Date().toISOString().slice(0,10);
+    const filename = `genco-talent-merit-${currentYear}-${stamp}.csv`;
+    const doneToast = () => showToast(`Exported ${rows.length} talent${rows.length===1?'':'s'} for Cycle ${currentYear}.`);
+
+    // Inside the Claude artifact sandbox, a plain <a download> link is
+    // blocked silently — the sandbox has no filesystem access of its own.
+    // Use the platform's downloads capability there instead. On a normal
+    // deployment (e.g. GitHub Pages) window.claude isn't present, so fall
+    // through to the ordinary blob-download link.
+    if(typeof window.claude !== 'undefined' && window.claude.use){
+      try{
+        const downloads = await window.claude.use('downloads');
+        if(downloads){
+          await downloads.save({ filename, data: blob });
+          doneToast();
+          return;
+        }
+      }catch(e){
+        if(e && e.code === 'declined') return; // viewer said no — nothing else to do
+        console.warn('downloads.save failed', e);
+        showToast('Export failed. Please try again.', true);
+        return;
+      }
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    doneToast();
+  }
+  document.getElementById('exportDirectoryBtn').addEventListener('click', exportDirectoryToExcel);
 
   document.querySelectorAll('th.sortable').forEach(th=>{
     th.addEventListener('click', ()=>{
